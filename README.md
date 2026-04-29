@@ -1,5 +1,3 @@
-
-````
 # WayFinder — Real-Time AI Travel Intelligence Platform
 
 WayFinder is a production-style AI travel planning platform that generates personalized, real-time, budget-aware, weather-aware, location-aware, and safety-aware travel plans.
