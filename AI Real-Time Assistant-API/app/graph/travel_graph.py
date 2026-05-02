@@ -28,137 +28,34 @@ TOOL_MAP = {tool.name: tool for tool in TRAVEL_TOOLS}
 # ============================================================
 
 TOOL_BINDING_SYSTEM_PROMPT = """
-You are WayFinder, an intelligent travel planning agent.
+You are WayFinder, a travel planning AI agent.
 
-You have access to real-time and dynamic tools. You must use tools to collect reliable data before generating the final travel plan.
+Use tools before creating the final plan. City-guide RAG is disabled in this deployment.
+Use dynamic places, weather, budget, mobility, news if requested, and risk tools.
 
-IMPORTANT DEPLOYMENT NOTE:
-City-guide RAG is currently disabled for this Render Free deployment.
-Do not call or expect a city guide RAG tool.
-Use dynamic places discovery, stay/mobility tools, weather, budget, news, trends, and risk tools instead.
+Rules:
+- Do not invent weather, places, prices, ratings, reviews, timings, hotel names, or exact cab fares.
+- For nightlife, pubs, clubs, bars, or cafes,temples, hospital, hotels or any other locations, use places and mobility tools.
+- If news_required is false, avoid news tools.
+- If budget is over, add budget_warning.
+- Mention limitations for dynamic places and approximate transport costs.
 
-You are not allowed to invent:
-- weather
-- places
-- budget
-- travel risk
-- local news
-- transport strategy
-- stay area recommendations
-- hotel names
-- ratings
-- reviews
-- opening hours
-- entry fees
-- exact cab fares
-
-AVAILABLE CAPABILITIES
-
-You may use tools for:
-1. Weather data
-2. Real places discovery
-3. Stay and mobility discovery
-4. Place clustering
-5. Transport cost estimation
-6. Stay area scoring
-7. Mobility safety analysis
-8. Budget estimation
-9. News fetching
-10. News sentiment analysis
-11. Local trend extraction
-12. Travel risk analysis
-
-GENERAL EXECUTION STRATEGY
-
-STEP 1:
-Call weather and real places discovery tools.
-
-STEP 2:
-If real places are available, call stay and mobility related tools:
-- stay area discovery
-- place clustering
-- transport cost estimation
-- stay area scoring
-- mobility safety analysis
-
-STEP 3:
-Call budget estimation using destination, days, budget, travel style, food preference, travelers, interests, and discovered places.
-
-STEP 4:
-If news is required, call news fetch, sentiment, trend, and risk tools.
-
-STEP 5:
-Generate the final answer as valid JSON only.
-
-IMPORTANT TOOL USAGE RULES
-
-1. If the user asks for nightlife, pubs, clubs, bars, lounges, or cafes:
-   - You must use places discovery.
-   - You should use stay and mobility tools.
-   - You must consider late-night safety.
-   - You must include safe cab/transport guidance.
-
-2. Since city guide RAG is disabled:
-   - Do not mention stored city guide knowledge as an active source.
-   - Do not claim curated city guide data exists.
-   - Use discovered places and stay/mobility tools instead.
-   - Add a data limitation saying this deployment uses dynamic places instead of city guide RAG.
-
-3. If budget estimation says over_budget:
-   - Do not claim the trip is within budget.
-   - Add budget_warning.
-   - Suggest cost-saving adjustments.
-
-4. If weather, news, or places data is unavailable:
-   - Mention that clearly in data_limitations.
-   - Do not hallucinate missing details.
-
-5. Do not invent:
-   - exact cab fares
-   - hotel names
-   - ratings
-   - reviews
-   - opening hours
-   - entry fees
-   - ticket prices
-   - event details
-   unless they are returned by tools.
-
-FINAL JSON FORMAT
-
-When you are ready to answer, return only valid JSON in this exact structure:
+Return only valid JSON:
 
 {
   "itinerary": {
-    "day_1": [
-      "activity 1",
-      "activity 2",
-      "activity 3"
-    ]
+    "day_1": ["activity 1", "activity 2"]
   },
-  "food_suggestions": [
-    "suggestion 1",
-    "suggestion 2"
-  ],
-  "travel_tips": [
-    "tip 1",
-    "tip 2"
-  ],
-  "safety_tips": [
-    "tip 1",
-    "tip 2"
-  ],
-  "budget_warning": "short warning if needed, otherwise empty string",
-  "data_limitations": [
-    "mention unavailable or uncertain data here"
-  ],
-  "final_summary": "short personalized summary"
+  "food_suggestions": [],
+  "travel_tips": [],
+  "safety_tips": [],
+  "budget_warning": "",
+  "data_limitations": [],
+  "final_summary": ""
 }
 
-The itinerary must contain exactly the number of days requested by the user.
-Return JSON only. No markdown. No explanation outside JSON.
+The itinerary must contain exactly the requested number of days.
 """
-
 
 # ============================================================
 # Helper Functions
@@ -218,30 +115,21 @@ def ensure_list(value: Any) -> List[str]:
 
 def build_user_prompt(input_data: Dict[str, Any]) -> str:
     return f"""
-Create a personalized travel plan using tools first.
-
-USER TRIP DETAILS
+Plan this trip using available tools.
 
 Destination: {input_data.get("destination")}
 Days: {input_data.get("days")}
 Travelers: {input_data.get("travelers", 1)}
-Budget: ₹{input_data.get("budget")}
-Travel Style: {input_data.get("travel_style", "comfort")}
-Food Preference: {input_data.get("food_preference", "mixed")}
-Source City: {input_data.get("source_city")}
+Budget INR: {input_data.get("budget")}
+Travel style: {input_data.get("travel_style", "comfort")}
+Food preference: {input_data.get("food_preference", "mixed")}
+Source city: {input_data.get("source_city")}
 Interests: {input_data.get("interests", [])}
-News Required: {input_data.get("news_required", True)}
-News Limit: {input_data.get("news_limit", 5)}
-Risk Check: {input_data.get("risk_check", True)}
+News required: {input_data.get("news_required", False)}
+News limit: {input_data.get("news_limit", 2)}
+Risk check: {input_data.get("risk_check", True)}
 
-IMPORTANT:
-- Use tools before final answer.
-- City guide RAG is currently disabled for this deployment.
-- Use dynamic places discovery instead of city guide RAG.
-- For nightlife/cafes/pubs/clubs, use places and stay/mobility tools.
-- For budget, use the budget tool.
-- For safety, use risk and mobility safety tools.
-- Return final answer as valid JSON only.
+Use dynamic places instead of RAG. Return final JSON only.
 """
 
 
@@ -607,9 +495,11 @@ def tool_executor_node(state: TravelGraphState) -> TravelGraphState:
                 result=result,
             )
 
+            compact_result = compact_tool_result(tool_name, result)
+
             new_messages.append(
                 ToolMessage(
-                    content=safe_json_dumps(result),
+                    content=safe_json_dumps(compact_result),
                     tool_call_id=tool_call_id,
                 )
             )
@@ -786,7 +676,7 @@ def run_travel_planner_agent(input_data: Dict[str, Any]) -> Dict[str, Any]:
         "interests": input_data.get("interests", []),
 
         "news_required": input_data.get("news_required", True),
-        "news_limit": input_data.get("news_limit", 5),
+        "news_limit": input_data.get("news_limit", 2),
         "risk_check": input_data.get("risk_check", True),
 
         "weather_summary": {},
@@ -822,9 +712,117 @@ def run_travel_planner_agent(input_data: Dict[str, Any]) -> Dict[str, Any]:
 
         # Render Free optimization.
         # Keep this low to avoid high latency, token usage, and memory pressure.
-        "max_tool_rounds": 4,
+        "max_tool_rounds": 2,
     }
 
     final_state = travel_graph.invoke(initial_state)
 
     return final_state
+def compact_tool_result(tool_name: str, result: Any) -> Any:
+    """
+    Reduces tool output before sending it back to the LLM.
+    Full result is still stored in state, but LLM receives a smaller summary.
+    """
+
+    if not isinstance(result, dict):
+        return result
+
+    if tool_name == "places_discovery_tool":
+        places = result.get("places", [])[:6]
+
+        return {
+            "destination": result.get("destination"),
+            "places_found": result.get("places_found"),
+            "places": [
+                {
+                    "name": place.get("name"),
+                    "category": place.get("category"),
+                    "address": place.get("address"),
+                }
+                for place in places
+            ],
+            "limitations": result.get("limitations", []),
+        }
+
+    if tool_name == "stay_area_discovery_tool":
+        return {
+            "destination": result.get("destination"),
+            "points_found": result.get("points_found"),
+            "category_counts": result.get("category_counts", {}),
+            "limitations": result.get("limitations", []),
+        }
+
+    if tool_name == "place_clustering_tool":
+        clusters = result.get("clusters", [])[:4]
+
+        return {
+            "clusters_found": result.get("clusters_found"),
+            "clusters": [
+                {
+                    "cluster_id": cluster.get("cluster_id"),
+                    "area_name": cluster.get("area_name"),
+                    "dominant_category": cluster.get("dominant_category"),
+                    "places_count": cluster.get("places_count"),
+                    "planning_tip": cluster.get("planning_tip"),
+                }
+                for cluster in clusters
+            ],
+        }
+
+    if tool_name == "news_fetch_tool":
+        articles = result.get("articles", [])[:2]
+
+        return {
+            "summary": result.get("summary", ""),
+            "articles": [
+                {
+                    "title": article.get("title"),
+                    "source": article.get("source"),
+                }
+                for article in articles
+            ],
+        }
+
+    if tool_name == "budget_estimator_tool":
+        return {
+            "total_estimated_cost": result.get("total_estimated_cost"),
+            "total_estimate": result.get("total_estimate"),
+            "category_totals": result.get("category_totals"),
+            "user_budget": result.get("user_budget"),
+            "within_budget": result.get("within_budget"),
+            "budget_status": result.get("budget_status"),
+            "budget_note": result.get("budget_note"),
+            "recommendations": result.get("recommendations", [])[:3],
+        }
+
+    if tool_name == "transport_cost_tool":
+        return {
+            "transport_pattern": result.get("transport_pattern"),
+            "estimated_total_transport_cost": result.get("estimated_total_transport_cost"),
+            "budget_impact": result.get("budget_impact"),
+            "daytime_strategy": result.get("daytime_strategy"),
+            "late_night_plan": result.get("late_night_plan"),
+        }
+
+    if tool_name == "stay_area_scoring_tool":
+        return {
+            "recommended_stay_areas": result.get("recommended_stay_areas", [])[:3],
+            "selection_logic": result.get("selection_logic", []),
+        }
+
+    if tool_name == "mobility_safety_tool":
+        return {
+            "mobility_safety_level": result.get("mobility_safety_level"),
+            "reasons": result.get("reasons", []),
+            "safety_rules": result.get("safety_rules", [])[:4],
+        }
+
+    if tool_name == "travel_risk_tool":
+        return {
+            "risk_level": result.get("risk_level"),
+            "summary": result.get("summary"),
+            "risk_factors": result.get("risk_factors", [])[:4],
+            "recommendations": result.get("recommendations", [])[:4],
+        }
+
+    return result
