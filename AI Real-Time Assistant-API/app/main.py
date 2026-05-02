@@ -24,8 +24,8 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-app.include_router(health_router, prefix="/api/v1/health", tags=["Health"])
-app.include_router(travel_router, prefix="/api/v1/travel", tags=["Travel"])
+app.include_router(health_router, prefix="/api/v1", tags=["Health"])
+app.include_router(travel_router, prefix="/api/v1", tags=["Travel"])
 
 
 @app.get("/")
