@@ -7,13 +7,23 @@ pydantic-settings
 langchain
 langchain-core
 langchain-groq
-langchain-community
 langgraph
 langsmith
-
-sentence-transformers
-chromadb
 
 requests
 httpx
 pymongo
+
+# ============================================================
+# RAG dependencies disabled for Render Free deployment.
+# Do not delete these.
+# Uncomment only in the full RAG-enabled branch/deployment.
+# ============================================================
+
+# chromadb
+# sentence-transformers
+# torch
+# transformers
+# langchain-chroma
+# langchain-huggingface
+# langchain-community

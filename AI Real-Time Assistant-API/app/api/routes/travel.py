@@ -2,8 +2,16 @@ from fastapi import APIRouter, HTTPException
 
 from app.schemas.travel import TravelPlanRequest, TravelPlanResponse
 from app.graph.travel_graph import run_travel_planner_agent
-from app.rag.ingest_city_guides import ingest_city_guides
 from app.tools.tool_registry import TRAVEL_TOOLS
+
+# ============================================================
+# RAG ingestion disabled for Render Free deployment.
+# Do not delete this import.
+# Uncomment this only in the full RAG-enabled branch/deployment.
+# ============================================================
+
+# from app.rag.ingest_city_guides import ingest_city_guides
+
 
 router = APIRouter()
 
@@ -22,10 +30,15 @@ def create_travel_plan(request: TravelPlanRequest):
             "food_preference": result.get("food_preference"),
 
             "weather_summary": result.get("weather_summary", {}),
-            "city_guide_context": result.get("city_guide_context", ""),
+            "city_guide_context": result.get(
+                "city_guide_context",
+                "City guide RAG is disabled for this deployment. This plan uses dynamic places and live tools.",
+            ),
 
             "places_result": result.get("places_result", {}),
             "discovered_places": result.get("discovered_places", []),
+
+            "stay_mobility_plan": result.get("stay_mobility_plan", {}),
 
             "cost_breakdown": result.get("cost_breakdown", {}),
 
@@ -53,17 +66,23 @@ def create_travel_plan(request: TravelPlanRequest):
         )
 
 
-@router.post("/ingest-city-guides")
-def ingest_guides():
-    try:
-        result = ingest_city_guides()
-        return result
+# ============================================================
+# RAG ingestion endpoint disabled for Render Free deployment.
+# Do not delete this block.
+# Uncomment this only in the full RAG-enabled branch/deployment.
+# ============================================================
 
-    except Exception as e:
-        raise HTTPException(
-            status_code=500,
-            detail=f"City guide ingestion failed: {str(e)}",
-        )
+# @router.post("/ingest-city-guides")
+# def ingest_guides():
+#     try:
+#         result = ingest_city_guides()
+#         return result
+#
+#     except Exception as e:
+#         raise HTTPException(
+#             status_code=500,
+#             detail=f"City guide ingestion failed: {str(e)}",
+#         )
 
 
 @router.get("/tools")

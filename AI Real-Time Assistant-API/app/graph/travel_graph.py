@@ -1,510 +1,184 @@
 import json
 import re
-from datetime import datetime, timezone
+from typing import Dict, Any, List
 
 from langgraph.graph import StateGraph, START, END
-from langchain_core.prompts import ChatPromptTemplate
+from langchain_core.messages import (
+    SystemMessage,
+    HumanMessage,
+    AIMessage,
+    ToolMessage,
+)
 from langsmith import traceable
 
 from app.graph.state import TravelGraphState
-
-from app.tools.weather_tool import weather_tool
-from app.tools.budget_tool import budget_estimator_tool
-from app.tools.city_guide_tool import city_guide_rag_tool
-from app.tools.places_tool import places_discovery_tool
-from app.tools.news_tool import news_fetch_tool
-from app.tools.sentiment_tool import news_sentiment_tool
-from app.tools.risk_analyzer import travel_risk_tool
-from app.tools.trend_tool import local_trend_tool
-
 from app.llm.groq_client import get_llm
-from app.prompts.travel_prompt import TRAVEL_PLANNER_PROMPT
-from app.core.database import get_news_analysis_history_collection
+from app.tools.tool_registry import TRAVEL_TOOLS
 
 
-ROUTER_PROMPT = """
-You are a routing node inside a LangGraph travel planner.
+# ============================================================
+# Tool Registry Helpers
+# ============================================================
 
-The user has already submitted structured travel data.
+TOOL_MAP = {tool.name: tool for tool in TRAVEL_TOOLS}
 
-Your job is ONLY to decide which tools are required.
 
-Input:
-Destination: {destination}
-Days: {days}
-Budget: {budget}
-Travel Style: {travel_style}
-Food Preference: {food_preference}
-Interests: {interests}
-News Required: {news_required}
-Risk Check: {risk_check}
+# ============================================================
+# System Prompt for Tool-Binding Agent
+# ============================================================
 
-Tool decision rules:
-1. For a travel plan, weather is usually needed.
-2. For a travel plan, city guide RAG is usually needed.
-3. If user interests require real places such as clubs, pubs, cafes, restaurants, malls, hospitals, museums, attractions, beaches, nightlife, or shopping:
-   - places_needed=true
-4. If budget is provided, budget estimation is needed.
-5. If news_required is true, news is needed.
-6. If news is needed, news analysis is needed.
-7. If risk_check is true, risk analysis is needed.
-8. If interests include clubs, pubs, bars, parties, nightlife, late-night food, events, or concerts:
-   - city_guide_needed=true
-   - places_needed=true
-   - budget_needed=true
-   - news_needed=true
-   - news_analysis_needed=true
-   - risk_needed=true
-9. If interests include safety, traffic, news, protest, events, or local updates:
-   - news_needed=true
-   - risk_needed=true
+TOOL_BINDING_SYSTEM_PROMPT = """
+You are WayFinder, an intelligent travel planning agent.
 
-Return valid JSON only.
+You have access to real-time and dynamic tools. You must use tools to collect reliable data before generating the final travel plan.
 
-JSON format:
+IMPORTANT DEPLOYMENT NOTE:
+City-guide RAG is currently disabled for this Render Free deployment.
+Do not call or expect a city guide RAG tool.
+Use dynamic places discovery, stay/mobility tools, weather, budget, news, trends, and risk tools instead.
+
+You are not allowed to invent:
+- weather
+- places
+- budget
+- travel risk
+- local news
+- transport strategy
+- stay area recommendations
+- hotel names
+- ratings
+- reviews
+- opening hours
+- entry fees
+- exact cab fares
+
+AVAILABLE CAPABILITIES
+
+You may use tools for:
+1. Weather data
+2. Real places discovery
+3. Stay and mobility discovery
+4. Place clustering
+5. Transport cost estimation
+6. Stay area scoring
+7. Mobility safety analysis
+8. Budget estimation
+9. News fetching
+10. News sentiment analysis
+11. Local trend extraction
+12. Travel risk analysis
+
+GENERAL EXECUTION STRATEGY
+
+STEP 1:
+Call weather and real places discovery tools.
+
+STEP 2:
+If real places are available, call stay and mobility related tools:
+- stay area discovery
+- place clustering
+- transport cost estimation
+- stay area scoring
+- mobility safety analysis
+
+STEP 3:
+Call budget estimation using destination, days, budget, travel style, food preference, travelers, interests, and discovered places.
+
+STEP 4:
+If news is required, call news fetch, sentiment, trend, and risk tools.
+
+STEP 5:
+Generate the final answer as valid JSON only.
+
+IMPORTANT TOOL USAGE RULES
+
+1. If the user asks for nightlife, pubs, clubs, bars, lounges, or cafes:
+   - You must use places discovery.
+   - You should use stay and mobility tools.
+   - You must consider late-night safety.
+   - You must include safe cab/transport guidance.
+
+2. Since city guide RAG is disabled:
+   - Do not mention stored city guide knowledge as an active source.
+   - Do not claim curated city guide data exists.
+   - Use discovered places and stay/mobility tools instead.
+   - Add a data limitation saying this deployment uses dynamic places instead of city guide RAG.
+
+3. If budget estimation says over_budget:
+   - Do not claim the trip is within budget.
+   - Add budget_warning.
+   - Suggest cost-saving adjustments.
+
+4. If weather, news, or places data is unavailable:
+   - Mention that clearly in data_limitations.
+   - Do not hallucinate missing details.
+
+5. Do not invent:
+   - exact cab fares
+   - hotel names
+   - ratings
+   - reviews
+   - opening hours
+   - entry fees
+   - ticket prices
+   - event details
+   unless they are returned by tools.
+
+FINAL JSON FORMAT
+
+When you are ready to answer, return only valid JSON in this exact structure:
+
 {
-  "weather_needed": true,
-  "city_guide_needed": true,
-  "places_needed": true,
-  "budget_needed": true,
-  "news_needed": true,
-  "news_analysis_needed": true,
-  "risk_needed": true
+  "itinerary": {
+    "day_1": [
+      "activity 1",
+      "activity 2",
+      "activity 3"
+    ]
+  },
+  "food_suggestions": [
+    "suggestion 1",
+    "suggestion 2"
+  ],
+  "travel_tips": [
+    "tip 1",
+    "tip 2"
+  ],
+  "safety_tips": [
+    "tip 1",
+    "tip 2"
+  ],
+  "budget_warning": "short warning if needed, otherwise empty string",
+  "data_limitations": [
+    "mention unavailable or uncertain data here"
+  ],
+  "final_summary": "short personalized summary"
 }
+
+The itinerary must contain exactly the number of days requested by the user.
+Return JSON only. No markdown. No explanation outside JSON.
 """
 
 
-def default_router_decision(state: TravelGraphState) -> dict:
-    news_required = state.get("news_required", True)
-    risk_check = state.get("risk_check", True)
+# ============================================================
+# Helper Functions
+# ============================================================
 
-    return {
-        "weather_needed": True,
-        "city_guide_needed": True,
-        "places_needed": True,
-        "budget_needed": True,
-        "news_needed": news_required,
-        "news_analysis_needed": news_required,
-        "risk_needed": risk_check,
-    }
-
-
-@traceable(name="router_node")
-def router_node(state: TravelGraphState) -> TravelGraphState:
-    llm = get_llm()
-    prompt = ChatPromptTemplate.from_template(ROUTER_PROMPT)
-    chain = prompt | llm
-
+def safe_json_dumps(data: Any) -> str:
     try:
-        response = chain.invoke(
-            {
-                "destination": state["destination"],
-                "days": state["days"],
-                "budget": state["budget"],
-                "travel_style": state["travel_style"],
-                "food_preference": state["food_preference"],
-                "interests": state.get("interests", []),
-                "news_required": state.get("news_required", True),
-                "risk_check": state.get("risk_check", True),
-            }
-        )
-
-        parsed = extract_json_from_llm_response(response.content)
-
-        if not parsed:
-            parsed = default_router_decision(state)
-
+        return json.dumps(data, indent=2, ensure_ascii=False)
     except Exception:
-        parsed = default_router_decision(state)
-
-    return {
-        **state,
-        "weather_needed": parsed.get("weather_needed", True),
-        "city_guide_needed": parsed.get("city_guide_needed", True),
-        "places_needed": parsed.get("places_needed", True),
-        "budget_needed": parsed.get("budget_needed", True),
-        "news_needed": parsed.get("news_needed", state.get("news_required", True)),
-        "news_analysis_needed": parsed.get(
-            "news_analysis_needed",
-            state.get("news_required", True),
-        ),
-        "risk_needed": parsed.get("risk_needed", state.get("risk_check", True)),
-        "executed_nodes": ["router_node"],
-    }
+        return str(data)
 
 
-@traceable(name="weather_node")
-def weather_node(state: TravelGraphState) -> TravelGraphState:
-    if not state.get("weather_needed", True):
-        return {
-            **state,
-            "weather_summary": {"message": "Weather tool skipped by router."},
-            "executed_nodes": state.get("executed_nodes", []) + ["weather_node_skipped"],
-        }
-
-    weather_summary = weather_tool.invoke(
-        {
-            "destination": state["destination"],
-        }
-    )
-
-    return {
-        **state,
-        "weather_summary": weather_summary,
-        "executed_nodes": state.get("executed_nodes", []) + ["weather_node"],
-    }
-
-
-@traceable(name="city_guide_node")
-def city_guide_node(state: TravelGraphState) -> TravelGraphState:
-    if not state.get("city_guide_needed", True):
-        return {
-            **state,
-            "city_guide_context": "City guide RAG skipped by router.",
-            "executed_nodes": state.get("executed_nodes", []) + ["city_guide_node_skipped"],
-        }
-
-    interests = state.get("interests", [])
-
-    user_query = f"""
-    Plan a {state["days"]}-day trip to {state["destination"]}
-    under ₹{state["budget"]}.
-
-    Travel style: {state["travel_style"]}
-    Food preference: {state["food_preference"]}
-    User interests: {interests}
-
-    Important:
-    The itinerary must strongly prioritize these user interests:
-    {interests}
-
-    If interests include clubs, pubs, nightlife, bars, lounges, cafes, or parties,
-    retrieve nightlife-related places, zones, evening activities, safety tips,
-    late-night transport, and budget notes instead of generic tourist places.
+def extract_json_from_llm_response(content: str) -> Dict[str, Any]:
+    """
+    Handles:
+    - valid JSON
+    - ```json ... ```
+    - extra text before/after JSON
     """
 
-    city_guide_context = city_guide_rag_tool.invoke(
-        {
-            "destination": state["destination"],
-            "user_query": user_query,
-            "interests": interests,
-            "food_preference": state.get("food_preference"),
-            "travel_style": state.get("travel_style"),
-        }
-    )
-
-    return {
-        **state,
-        "city_guide_context": city_guide_context,
-        "executed_nodes": state.get("executed_nodes", []) + ["city_guide_node"],
-    }
-
-
-@traceable(name="places_discovery_node")
-def places_discovery_node(state: TravelGraphState) -> TravelGraphState:
-    if not state.get("places_needed", True):
-        return {
-            **state,
-            "places_result": {"message": "Places discovery skipped by router."},
-            "discovered_places": [],
-            "executed_nodes": state.get("executed_nodes", []) + [
-                "places_discovery_node_skipped"
-            ],
-        }
-
-    places_result = places_discovery_tool.invoke(
-        {
-            "destination": state["destination"],
-            "interests": state.get("interests", []),
-            "limit": 12,
-        }
-    )
-
-    return {
-        **state,
-        "places_result": places_result,
-        "discovered_places": places_result.get("places", []),
-        "executed_nodes": state.get("executed_nodes", []) + ["places_discovery_node"],
-    }
-
-
-@traceable(name="budget_node")
-def budget_node(state: TravelGraphState) -> TravelGraphState:
-    if not state.get("budget_needed", True):
-        return {
-            **state,
-            "cost_breakdown": {"message": "Budget estimation skipped by router."},
-            "executed_nodes": state.get("executed_nodes", []) + ["budget_node_skipped"],
-        }
-
-    cost_breakdown = budget_estimator_tool.invoke(
-        {
-            "destination": state["destination"],
-            "days": state["days"],
-            "budget": state["budget"],
-            "travel_style": state["travel_style"],
-            "interests": state.get("interests", []),
-            "food_preference": state.get("food_preference", "mixed"),
-            "travelers": state.get("travelers", 1),
-            "discovered_places": state.get("discovered_places", []),
-            "city_guide_context": state.get("city_guide_context", ""),
-        }
-    )
-
-    return {
-        **state,
-        "cost_breakdown": cost_breakdown,
-        "executed_nodes": state.get("executed_nodes", []) + ["budget_node"],
-    }
-
-@traceable(name="news_fetch_node")
-def news_fetch_node(state: TravelGraphState) -> TravelGraphState:
-    if not state.get("news_needed", True):
-        return {
-            **state,
-            "news_articles": [],
-            "news_summary": "Live news skipped by router.",
-            "executed_nodes": state.get("executed_nodes", []) + [
-                "news_fetch_node_skipped"
-            ],
-        }
-
-    news_articles = news_fetch_tool.invoke(
-        {
-            "destination": state["destination"],
-            "limit": state.get("news_limit", 5),
-            "interests": state.get("interests", []),
-        }
-    )
-
-    return {
-        **state,
-        "news_articles": news_articles,
-        "executed_nodes": state.get("executed_nodes", []) + ["news_fetch_node"],
-    }
-
-
-@traceable(name="news_analysis_node")
-def news_analysis_node(state: TravelGraphState) -> TravelGraphState:
-    if not state.get("news_analysis_needed", True):
-        return {
-            **state,
-            "news_summary": "News analysis skipped by router.",
-            "news_sentiment": "Neutral",
-            "local_trends": [],
-            "executed_nodes": state.get("executed_nodes", []) + [
-                "news_analysis_node_skipped"
-            ],
-        }
-
-    news_articles = state.get("news_articles", [])
-
-    if not news_articles:
-        return {
-            **state,
-            "news_summary": "No live news articles were analyzed.",
-            "news_sentiment": "Neutral",
-            "local_trends": [],
-            "executed_nodes": state.get("executed_nodes", []) + [
-                "news_analysis_node_no_articles"
-            ],
-        }
-
-    news_summary = summarize_news_for_travelers(
-        destination=state["destination"],
-        articles=news_articles,
-        interests=state.get("interests", []),
-    )
-
-    news_sentiment = news_sentiment_tool.invoke(
-        {
-            "news_summary": news_summary,
-        }
-    )
-
-    local_trends = local_trend_tool.invoke(
-        {
-            "news_summary": news_summary,
-        }
-    )
-
-    save_news_analysis_history(
-        destination=state["destination"],
-        news_summary=news_summary,
-        news_sentiment=news_sentiment,
-        local_trends=local_trends,
-    )
-
-    return {
-        **state,
-        "news_summary": news_summary,
-        "news_sentiment": news_sentiment,
-        "local_trends": local_trends,
-        "executed_nodes": state.get("executed_nodes", []) + ["news_analysis_node"],
-    }
-
-
-@traceable(name="risk_analysis_node")
-def risk_analysis_node(state: TravelGraphState) -> TravelGraphState:
-    if not state.get("risk_needed", True):
-        return {
-            **state,
-            "travel_risk": {
-                "risk_level": "Not Checked",
-                "reason": "Risk analysis skipped by router.",
-                "risk_factors": [],
-            },
-            "executed_nodes": state.get("executed_nodes", []) + [
-                "risk_analysis_node_skipped"
-            ],
-        }
-
-    travel_risk = travel_risk_tool.invoke(
-        {
-            "destination": state["destination"],
-            "news_summary": state.get("news_summary", ""),
-            "weather_summary": state.get("weather_summary", {}),
-        }
-    )
-
-    return {
-        **state,
-        "travel_risk": travel_risk,
-        "executed_nodes": state.get("executed_nodes", []) + ["risk_analysis_node"],
-    }
-
-
-@traceable(name="llm_planner_node")
-def llm_planner_node(state: TravelGraphState) -> TravelGraphState:
-    llm = get_llm()
-    prompt = ChatPromptTemplate.from_template(TRAVEL_PLANNER_PROMPT)
-    chain = prompt | llm
-
-    response = chain.invoke(
-        {
-            "destination": state["destination"],
-            "days": state["days"],
-            "budget": state["budget"],
-            "travel_style": state["travel_style"],
-            "food_preference": state["food_preference"],
-            "interests": state.get("interests", []),
-            "weather_summary": json.dumps(
-                state.get("weather_summary", {}),
-                indent=2,
-                ensure_ascii=False,
-            ),
-            "city_guide_context": state.get("city_guide_context", ""),
-            "discovered_places": json.dumps(
-                state.get("discovered_places", []),
-                indent=2,
-                ensure_ascii=False,
-            ),
-            "cost_breakdown": json.dumps(
-                state.get("cost_breakdown", {}),
-                indent=2,
-                ensure_ascii=False,
-            ),
-            "news_summary": state.get("news_summary", ""),
-            "news_sentiment": state.get("news_sentiment", "Neutral"),
-            "travel_risk": json.dumps(
-                state.get("travel_risk", {}),
-                indent=2,
-                ensure_ascii=False,
-            ),
-            "local_trends": json.dumps(
-                state.get("local_trends", []),
-                indent=2,
-                ensure_ascii=False,
-            ),
-        }
-    )
-
-    parsed = extract_json_from_llm_response(response.content)
-
-    validated = validate_final_plan(
-        parsed=parsed,
-        state=state,
-        raw_response=response.content,
-    )
-
-    return {
-        **state,
-        "itinerary": validated.get("itinerary", {}),
-        "food_suggestions": validated.get("food_suggestions", []),
-        "travel_tips": validated.get("travel_tips", []),
-        "safety_tips": validated.get("safety_tips", []),
-        "budget_warning": validated.get("budget_warning", ""),
-        "data_limitations": validated.get("data_limitations", []),
-        "final_summary": validated.get(
-            "final_summary",
-            "Travel plan generated successfully.",
-        ),
-        "executed_nodes": state.get("executed_nodes", []) + ["llm_planner_node"],
-    }
-
-
-@traceable(name="summarize_news_for_travelers")
-def summarize_news_for_travelers(
-    destination: str,
-    articles: list,
-    interests: list | None = None,
-) -> str:
-    interests = interests or []
-
-    llm = get_llm()
-
-    prompt = ChatPromptTemplate.from_template(
-        """
-        You are a live news analyzer for travelers.
-
-        Destination:
-        {destination}
-
-        User Interests:
-        {interests}
-
-        News Articles:
-        {articles}
-
-        Summarize these articles for a traveler.
-
-        Focus on:
-        - safety
-        - traffic
-        - weather alerts
-        - protests
-        - local events
-        - crowding
-        - travel restrictions
-        - anything related to the user's interests
-
-        If the interests include clubs, pubs, nightlife, bars, cafes, parties, or events:
-        - Focus on nightlife safety
-        - Late-night traffic
-        - Local restrictions
-        - Event crowding
-        - Safe transport
-        - Any relevant local updates
-
-        Keep the summary short and practical.
-        """
-    )
-
-    chain = prompt | llm
-
-    response = chain.invoke(
-        {
-            "destination": destination,
-            "interests": json.dumps(interests, ensure_ascii=False),
-            "articles": json.dumps(articles, indent=2, ensure_ascii=False),
-        }
-    )
-
-    return response.content.strip()
-
-
-@traceable(name="extract_json_from_llm_response")
-def extract_json_from_llm_response(content: str) -> dict:
     if not content:
         return {}
 
@@ -524,322 +198,557 @@ def extract_json_from_llm_response(content: str) -> dict:
         try:
             return json.loads(match.group())
         except Exception:
-            pass
+            return {}
 
     return {}
 
 
-@traceable(name="validate_final_plan")
-def validate_final_plan(
-    parsed: dict,
-    state: TravelGraphState,
-    raw_response: str = "",
-) -> dict:
-    days = state.get("days", 1)
-    interests = [str(item).lower() for item in state.get("interests", [])]
-    cost_breakdown = state.get("cost_breakdown", {})
-    travel_risk = state.get("travel_risk", {})
-    city_guide_context = state.get("city_guide_context", "")
-    discovered_places = state.get("discovered_places", [])
+def ensure_list(value: Any) -> List[str]:
+    if value is None:
+        return []
 
-    itinerary = parsed.get("itinerary", {})
-    food_suggestions = parsed.get("food_suggestions", [])
-    travel_tips = parsed.get("travel_tips", [])
-    safety_tips = parsed.get("safety_tips", [])
-    budget_warning = parsed.get("budget_warning", "")
-    data_limitations = parsed.get("data_limitations", [])
-    final_summary = parsed.get("final_summary", "")
-
-    repaired_itinerary = {}
-
-    for day_number in range(1, days + 1):
-        key = f"day_{day_number}"
-        activities = itinerary.get(key, [])
-
-        if not isinstance(activities, list):
-            activities = []
-
-        if len(activities) == 0:
-            activities = build_fallback_day_plan(state, day_number)
-
-        repaired_itinerary[key] = activities[:5]
-
-    within_budget = cost_breakdown.get("within_budget")
-
-    if within_budget is False and not budget_warning:
-        estimated = cost_breakdown.get("total_estimated_cost")
-        user_budget = cost_breakdown.get("user_budget") or state.get("budget")
-
-        budget_warning = (
-            f"The expected estimate is ₹{estimated}, which may exceed your planned "
-            f"budget of ₹{user_budget}. Consider reducing paid activities, "
-            "choosing lower-cost venues, or shortening late-night travel."
-        )
-
-    risk_level = str(travel_risk.get("risk_level", "")).lower()
-
-    if risk_level in ["medium", "high"]:
-        if not any(
-            "local" in str(tip).lower() or "safe" in str(tip).lower()
-            for tip in safety_tips
-        ):
-            safety_tips.append(
-                "Review local updates before heading out and avoid poorly lit or isolated areas."
-            )
-
-    if "No stored RAG city guide was found" in city_guide_context:
-        data_limitations = ensure_list(data_limitations)
-
-        missing_message = (
-            f"Stored city guide data is not available for {state.get('destination')}. "
-            "The plan uses discovered places, weather, budget, news, and general safety logic."
-        )
-
-        if missing_message not in data_limitations:
-            data_limitations.append(missing_message)
-
-    if discovered_places:
-        if not any("verify" in str(tip).lower() for tip in travel_tips):
-            travel_tips.append(
-                "Verify discovered places for current timings, entry rules, ratings, and availability before visiting."
-            )
-
-    nightlife_terms = [
-        "club",
-        "clubs",
-        "pub",
-        "pubs",
-        "bar",
-        "bars",
-        "nightlife",
-        "party",
-        "parties",
-        "cafe",
-        "cafes",
-        "lounge",
-        "lounges",
-    ]
-
-    interest_text = " ".join(interests)
-    has_nightlife_interest = any(term in interest_text for term in nightlife_terms)
-
-    if has_nightlife_interest:
-        generic_places = [
-            "charminar",
-            "golconda",
-            "birla mandir",
-            "mecca masjid",
-            "salar jung",
-            "hussain sagar",
-            "qutb shahi",
-            "chowmahalla",
-        ]
-
-        generic_count = 0
-        all_activities = []
-
-        for activities in repaired_itinerary.values():
-            all_activities.extend([str(activity).lower() for activity in activities])
-
-        for activity in all_activities:
-            if any(place in activity for place in generic_places):
-                generic_count += 1
-
-        if generic_count >= 2:
-            data_limitations = ensure_list(data_limitations)
-            data_limitations.append(
-                "The initial itinerary contained generic sightseeing suggestions. "
-                "It was adjusted to better match nightlife, pub, club, and cafe interests."
-            )
-
-            repaired_itinerary = build_interest_focused_itinerary(state)
-
-        if not any(
-            "cab" in str(tip).lower() or "late" in str(tip).lower()
-            for tip in safety_tips
-        ):
-            safety_tips.append(
-                "Use app-based cabs for late-night travel and avoid walking through isolated areas."
-            )
-
-        if not any(
-            "entry" in str(tip).lower()
-            or "dress" in str(tip).lower()
-            or "availability" in str(tip).lower()
-            or "cover" in str(tip).lower()
-            for tip in travel_tips
-        ):
-            travel_tips.append(
-                "Check venue entry rules, dress code, age restrictions, cover charges, and table availability before visiting."
-            )
-
-    if not final_summary:
-        final_summary = build_default_summary(state)
-
-    return {
-        "itinerary": repaired_itinerary,
-        "food_suggestions": ensure_list(food_suggestions),
-        "travel_tips": ensure_list(travel_tips),
-        "safety_tips": ensure_list(safety_tips),
-        "budget_warning": budget_warning,
-        "data_limitations": ensure_list(data_limitations),
-        "final_summary": final_summary,
-    }
-
-
-def ensure_list(value):
     if isinstance(value, list):
-        return value
+        return [str(item) for item in value]
 
-    if isinstance(value, str) and value.strip():
+    if isinstance(value, str):
         return [value]
 
-    return []
+    return [str(value)]
 
 
-def build_default_summary(state: TravelGraphState) -> str:
-    interests = state.get("interests", [])
-    destination = state.get("destination", "your destination")
-    days = state.get("days", 1)
+def build_user_prompt(input_data: Dict[str, Any]) -> str:
+    return f"""
+Create a personalized travel plan using tools first.
 
-    return (
-        f"Your {days}-day {destination} plan has been personalized around "
-        f"{', '.join(interests) if interests else 'your selected interests'}."
-    )
+USER TRIP DETAILS
+
+Destination: {input_data.get("destination")}
+Days: {input_data.get("days")}
+Travelers: {input_data.get("travelers", 1)}
+Budget: ₹{input_data.get("budget")}
+Travel Style: {input_data.get("travel_style", "comfort")}
+Food Preference: {input_data.get("food_preference", "mixed")}
+Source City: {input_data.get("source_city")}
+Interests: {input_data.get("interests", [])}
+News Required: {input_data.get("news_required", True)}
+News Limit: {input_data.get("news_limit", 5)}
+Risk Check: {input_data.get("risk_check", True)}
+
+IMPORTANT:
+- Use tools before final answer.
+- City guide RAG is currently disabled for this deployment.
+- Use dynamic places discovery instead of city guide RAG.
+- For nightlife/cafes/pubs/clubs, use places and stay/mobility tools.
+- For budget, use the budget tool.
+- For safety, use risk and mobility safety tools.
+- Return final answer as valid JSON only.
+"""
 
 
-def build_fallback_day_plan(state: TravelGraphState, day_number: int) -> list:
-    interests = " ".join(state.get("interests", [])).lower()
+def build_final_repair_prompt(
+    state: TravelGraphState,
+    raw_content: str,
+) -> List[Any]:
+    return [
+        SystemMessage(
+            content="""
+You are a JSON repair assistant.
+
+Convert the given travel plan content into valid JSON only.
+
+Use this exact schema:
+
+{
+  "itinerary": {
+    "day_1": [
+      "activity 1",
+      "activity 2",
+      "activity 3"
+    ]
+  },
+  "food_suggestions": [],
+  "travel_tips": [],
+  "safety_tips": [],
+  "budget_warning": "",
+  "data_limitations": [],
+  "final_summary": ""
+}
+
+Return JSON only.
+"""
+        ),
+        HumanMessage(
+            content=f"""
+Requested days: {state.get("days")}
+
+Raw content:
+{raw_content}
+"""
+        ),
+    ]
+
+
+def build_fallback_day_plan(
+    state: TravelGraphState,
+    day_number: int,
+) -> List[str]:
     destination = state.get("destination", "the destination")
-    discovered_places = state.get("discovered_places", [])
-
-    place_names = [place.get("name") for place in discovered_places if place.get("name")]
-    place_names = place_names[:3]
+    interests = " ".join(state.get("interests", [])).lower()
 
     if any(
-        term in interests
-        for term in [
-            "club",
-            "pub",
-            "bar",
+        keyword in interests
+        for keyword in [
             "nightlife",
-            "party",
+            "club",
+            "clubs",
+            "pub",
+            "pubs",
+            "bar",
+            "bars",
             "cafe",
             "cafes",
-            "lounge",
         ]
     ):
-        if place_names:
-            return [
-                f"Afternoon: Start with a relaxed cafe or food stop near {destination}.",
-                f"Evening: Consider discovered places such as {', '.join(place_names)} after verifying current details.",
-                "Night: Choose one pub, lounge, cafe, or nightlife venue after checking entry rules and availability.",
-                "Late night: Return using an app-based cab instead of walking or using isolated transport.",
-            ]
-
         return [
-            f"Afternoon: Keep the schedule relaxed with a cafe or dining area in {destination}.",
-            "Evening: Explore a nightlife-friendly commercial area after verifying local options.",
-            "Night: Choose a pub, lounge, or club only after checking current entry rules and availability.",
-            "Late night: Return using an app-based cab instead of walking or using isolated transport.",
-        ]
-
-    if place_names:
-        return [
-            f"Morning: Visit or explore {place_names[0]} after verifying current details.",
-            f"Afternoon: Continue with {place_names[1] if len(place_names) > 1 else 'a nearby food or shopping stop'}.",
-            f"Evening: Keep the plan flexible around {place_names[2] if len(place_names) > 2 else 'a nearby local area'} based on weather and traffic.",
+            f"Morning: Keep the schedule light and review verified places around {destination}.",
+            "Afternoon: Visit a cafe or food area from the discovered places if available.",
+            "Evening: Choose one nightlife/cafe cluster instead of moving across distant areas.",
+            "Night: Use app-based cab transport and verify venue timings before visiting.",
         ]
 
     return [
-        "Morning: Start with a destination activity aligned with your selected interests.",
-        "Afternoon: Choose a nearby food, shopping, or leisure stop based on your preference.",
-        "Evening: Keep time flexible for local conditions, traffic, and weather.",
+        f"Morning: Start with a nearby attraction or local area in {destination}.",
+        "Afternoon: Plan food, cafes, or indoor activities depending on weather.",
+        "Evening: Keep activities close together to reduce travel time.",
+        "Night: Return safely and avoid unnecessary late-night travel.",
     ]
 
 
-def build_interest_focused_itinerary(state: TravelGraphState) -> dict:
-    days = state.get("days", 1)
+def build_default_summary(state: TravelGraphState) -> str:
     destination = state.get("destination", "the destination")
-    discovered_places = state.get("discovered_places", [])
+    days = state.get("days", 1)
+    budget = state.get("budget", 0)
 
-    place_names = [place.get("name") for place in discovered_places if place.get("name")]
+    return (
+        f"This is a {days}-day personalized travel plan for {destination} "
+        f"based on your budget of ₹{budget}, interests, available dynamic places, live tools, and safety considerations."
+    )
 
-    itinerary = {}
 
-    for day_number in range(1, days + 1):
-        first_place = place_names[(day_number - 1) % len(place_names)] if place_names else None
-        second_place = place_names[day_number % len(place_names)] if len(place_names) > 1 else None
+def validate_final_plan(
+    parsed: Dict[str, Any],
+    state: TravelGraphState,
+    raw_response: str = "",
+) -> Dict[str, Any]:
+    """
+    Ensures final response is safe for API response model.
+    Repairs missing fields.
+    """
 
-        evening_activity = (
-            f"Evening: Consider {first_place} after verifying current timings, entry rules, and availability."
-            if first_place
-            else "Evening: Explore a nightlife-friendly zone from available context instead of generic sightseeing."
+    days = int(state.get("days", 1))
+
+    if not isinstance(parsed, dict):
+        parsed = {}
+
+    itinerary = parsed.get("itinerary", {})
+
+    if not isinstance(itinerary, dict):
+        itinerary = {}
+
+    repaired_itinerary = {}
+
+    for day in range(1, days + 1):
+        key = f"day_{day}"
+        activities = itinerary.get(key)
+
+        if not isinstance(activities, list) or not activities:
+            activities = build_fallback_day_plan(state, day)
+
+        repaired_itinerary[key] = [str(activity) for activity in activities]
+
+    cost_breakdown = state.get("cost_breakdown", {}) or {}
+    travel_risk = state.get("travel_risk", {}) or {}
+    discovered_places = state.get("discovered_places", []) or []
+    stay_mobility_plan = state.get("stay_mobility_plan", {}) or {}
+
+    budget_warning = parsed.get("budget_warning", "") or ""
+
+    if cost_breakdown and cost_breakdown.get("within_budget") is False:
+        budget_warning = (
+            cost_breakdown.get("budget_note")
+            or "This plan may exceed your selected budget. Reduce premium activities, long-distance transport, or paid experiences."
         )
 
-        night_activity = (
-            f"Night: Choose {second_place} or another discovered pub, lounge, club, or cafe after checking live availability."
-            if second_place
-            else "Night: Choose a pub, lounge, club, or cafe after checking live availability, entry rules, dress code, and cover charges."
+    data_limitations = ensure_list(parsed.get("data_limitations", []))
+
+    # ========================================================
+    # RAG disabled for Render Free deployment.
+    # Do not delete this block.
+    # Uncomment and adjust when city guide RAG is enabled again.
+    # ========================================================
+    #
+    # city_guide_context = state.get("city_guide_context", "") or ""
+    # if "No stored RAG city guide was found" in city_guide_context:
+    #     data_limitations.append(
+    #         "Stored city guide data was unavailable for this destination, so the plan relies more on discovered places and live tools."
+    #     )
+
+    data_limitations.append(
+        "City guide RAG is disabled for this deployment. The plan uses dynamic places, weather, budget, news, and safety tools."
+    )
+
+    if discovered_places:
+        data_limitations.append(
+            "Discovered places may need verification for current timings, entry rules, and availability."
         )
 
-        itinerary[f"day_{day_number}"] = [
-            f"Afternoon: Start with a relaxed cafe or dining area in {destination} that matches your preference.",
-            evening_activity,
-            night_activity,
-            "Late night: Return using an app-based cab and avoid isolated areas.",
-        ]
+    if stay_mobility_plan:
+        data_limitations.append(
+            "Stay and transport recommendations use approximate location and distance signals; verify hotel prices and actual cab fares before booking."
+        )
 
-    return itinerary
+    if not state.get("weather_summary"):
+        data_limitations.append(
+            "Weather data was unavailable or limited for this destination."
+        )
+
+    risk_level = str(travel_risk.get("risk_level", "")).lower()
+    safety_tips = ensure_list(parsed.get("safety_tips", []))
+
+    if risk_level in ["medium", "high", "medium-high"]:
+        safety_tips.append(
+            "Because the travel risk is not low, keep the schedule flexible and avoid isolated late-night movement."
+        )
+
+    interests = " ".join(state.get("interests", [])).lower()
+
+    if any(
+        keyword in interests
+        for keyword in ["nightlife", "club", "clubs", "pub", "pubs", "bar", "bars", "party"]
+    ):
+        safety_tips.append(
+            "For nightlife plans, use app-based cabs, avoid isolated areas, and share live location with a trusted contact."
+        )
+
+    return {
+        "itinerary": repaired_itinerary,
+        "food_suggestions": ensure_list(parsed.get("food_suggestions", [])),
+        "travel_tips": ensure_list(parsed.get("travel_tips", [])),
+        "safety_tips": list(dict.fromkeys(safety_tips)),
+        "budget_warning": budget_warning,
+        "data_limitations": list(dict.fromkeys(data_limitations)),
+        "final_summary": parsed.get("final_summary") or build_default_summary(state),
+    }
 
 
-@traceable(name="save_news_analysis_history")
-def save_news_analysis_history(
-    destination: str,
-    news_summary: str,
-    news_sentiment: str,
-    local_trends: list,
-) -> None:
-    try:
-        collection = get_news_analysis_history_collection()
+def update_state_from_tool_result(
+    state: TravelGraphState,
+    tool_name: str,
+    result: Any,
+) -> TravelGraphState:
+    """
+    Stores known tool outputs into normal API response fields.
+    This keeps your existing API response model working.
+    """
 
-        collection.insert_one(
-            {
-                "destination": destination.lower(),
-                "summary": news_summary,
-                "sentiment": news_sentiment,
-                "local_trends": local_trends,
-                "created_at": datetime.now(timezone.utc),
+    updated_state = {**state}
+
+    if tool_name == "weather_tool":
+        updated_state["weather_summary"] = (
+            result if isinstance(result, dict) else {"result": result}
+        )
+
+    # ========================================================
+    # RAG disabled for Render Free deployment.
+    # Do not delete this block.
+    # Uncomment when city_guide_rag_tool is enabled again in tool_registry.py.
+    # ========================================================
+    #
+    # elif tool_name == "city_guide_rag_tool":
+    #     updated_state["city_guide_context"] = (
+    #         result if isinstance(result, str) else safe_json_dumps(result)
+    #     )
+
+    elif tool_name == "places_discovery_tool":
+        updated_state["places_result"] = (
+            result if isinstance(result, dict) else {"result": result}
+        )
+
+        if isinstance(result, dict):
+            updated_state["discovered_places"] = result.get("places", [])
+
+    elif tool_name == "budget_estimator_tool":
+        updated_state["cost_breakdown"] = (
+            result if isinstance(result, dict) else {"result": result}
+        )
+
+    elif tool_name == "news_fetch_tool":
+        if isinstance(result, dict):
+            updated_state["news_articles"] = result.get("articles", [])
+            updated_state["news_summary"] = result.get("summary", "")
+        elif isinstance(result, list):
+            updated_state["news_articles"] = result
+        else:
+            updated_state["news_summary"] = str(result)
+
+    elif tool_name == "news_sentiment_tool":
+        if isinstance(result, dict):
+            updated_state["news_sentiment"] = result.get(
+                "sentiment",
+                safe_json_dumps(result),
+            )
+        else:
+            updated_state["news_sentiment"] = str(result)
+
+    elif tool_name == "local_trend_tool":
+        if isinstance(result, dict):
+            updated_state["local_trends"] = result.get("trends", [])
+        elif isinstance(result, list):
+            updated_state["local_trends"] = result
+        else:
+            updated_state["local_trends"] = [str(result)]
+
+    elif tool_name == "travel_risk_tool":
+        updated_state["travel_risk"] = (
+            result if isinstance(result, dict) else {"result": result}
+        )
+
+    elif tool_name in [
+        "stay_area_discovery_tool",
+        "place_clustering_tool",
+        "transport_cost_tool",
+        "stay_area_scoring_tool",
+        "mobility_safety_tool",
+    ]:
+        stay_plan = updated_state.get("stay_mobility_plan", {}) or {}
+        stay_plan[tool_name] = result
+        updated_state["stay_mobility_plan"] = stay_plan
+
+    else:
+        tool_outputs = updated_state.get("tool_outputs", {}) or {}
+        tool_outputs[tool_name] = result
+        updated_state["tool_outputs"] = tool_outputs
+
+    return updated_state
+
+
+# ============================================================
+# LangGraph Nodes
+# ============================================================
+
+@traceable(name="tool_binding_agent_node")
+def agent_node(state: TravelGraphState) -> TravelGraphState:
+    """
+    LLM node with tools bound.
+    The LLM decides whether to call tools or return final JSON.
+    """
+
+    llm = get_llm()
+    llm_with_tools = llm.bind_tools(TRAVEL_TOOLS)
+
+    messages = state.get("messages", [])
+
+    response = llm_with_tools.invoke(messages)
+
+    return {
+        **state,
+        "messages": messages + [response],
+        "executed_nodes": state.get("executed_nodes", []) + ["agent_node"],
+    }
+
+
+@traceable(name="tool_executor_node")
+def tool_executor_node(state: TravelGraphState) -> TravelGraphState:
+    """
+    Executes tool calls generated by the LLM.
+    """
+
+    messages = state.get("messages", [])
+
+    if not messages:
+        return state
+
+    last_message = messages[-1]
+    tool_calls = getattr(last_message, "tool_calls", None) or []
+
+    if not tool_calls:
+        return state
+
+    new_messages = []
+    updated_state = {**state}
+
+    for tool_call in tool_calls:
+        tool_name = tool_call.get("name")
+        tool_args = tool_call.get("args", {})
+        tool_call_id = tool_call.get("id")
+
+        tool = TOOL_MAP.get(tool_name)
+
+        if not tool:
+            error_payload = {
+                "error": f"Tool '{tool_name}' not found.",
+                "available_tools": list(TOOL_MAP.keys()),
             }
+
+            new_messages.append(
+                ToolMessage(
+                    content=safe_json_dumps(error_payload),
+                    tool_call_id=tool_call_id,
+                )
+            )
+            continue
+
+        try:
+            result = tool.invoke(tool_args)
+
+            updated_state = update_state_from_tool_result(
+                state=updated_state,
+                tool_name=tool_name,
+                result=result,
+            )
+
+            new_messages.append(
+                ToolMessage(
+                    content=safe_json_dumps(result),
+                    tool_call_id=tool_call_id,
+                )
+            )
+
+        except Exception as e:
+            error_payload = {
+                "tool": tool_name,
+                "error": str(e),
+            }
+
+            new_messages.append(
+                ToolMessage(
+                    content=safe_json_dumps(error_payload),
+                    tool_call_id=tool_call_id,
+                )
+            )
+
+    return {
+        **updated_state,
+        "messages": messages + new_messages,
+        "executed_nodes": updated_state.get("executed_nodes", []) + ["tool_executor_node"],
+        "tool_call_rounds": updated_state.get("tool_call_rounds", 0) + 1,
+    }
+
+
+@traceable(name="final_parser_node")
+def final_parser_node(state: TravelGraphState) -> TravelGraphState:
+    """
+    Parses final LLM JSON.
+    Repairs response if needed.
+    """
+
+    messages = state.get("messages", [])
+
+    final_content = ""
+
+    for message in reversed(messages):
+        if isinstance(message, AIMessage):
+            tool_calls = getattr(message, "tool_calls", None) or []
+
+            if not tool_calls and message.content:
+                final_content = message.content
+                break
+
+    parsed = extract_json_from_llm_response(final_content)
+
+    if not parsed:
+        llm = get_llm()
+        repair_messages = build_final_repair_prompt(
+            state=state,
+            raw_content=final_content,
         )
 
-    except Exception:
-        pass
+        repaired_response = llm.invoke(repair_messages)
+        parsed = extract_json_from_llm_response(repaired_response.content)
 
+    final_plan = validate_final_plan(
+        parsed=parsed,
+        state=state,
+        raw_response=final_content,
+    )
+
+    return {
+        **state,
+        "itinerary": final_plan["itinerary"],
+        "food_suggestions": final_plan["food_suggestions"],
+        "travel_tips": final_plan["travel_tips"],
+        "safety_tips": final_plan["safety_tips"],
+        "budget_warning": final_plan["budget_warning"],
+        "data_limitations": final_plan["data_limitations"],
+        "final_summary": final_plan["final_summary"],
+        "executed_nodes": state.get("executed_nodes", []) + ["final_parser_node"],
+    }
+
+
+# ============================================================
+# Conditional Routing
+# ============================================================
+
+def should_continue(state: TravelGraphState) -> str:
+    messages = state.get("messages", [])
+
+    if not messages:
+        return "final_parser_node"
+
+    last_message = messages[-1]
+    tool_calls = getattr(last_message, "tool_calls", None) or []
+
+    max_rounds = state.get("max_tool_rounds", 4)
+    current_rounds = state.get("tool_call_rounds", 0)
+
+    if tool_calls and current_rounds < max_rounds:
+        return "tool_executor_node"
+
+    return "final_parser_node"
+
+
+def after_tool_execution(state: TravelGraphState) -> str:
+    max_rounds = state.get("max_tool_rounds", 4)
+    current_rounds = state.get("tool_call_rounds", 0)
+
+    if current_rounds >= max_rounds:
+        return "final_parser_node"
+
+    return "agent_node"
+
+
+# ============================================================
+# Build Graph
+# ============================================================
 
 def build_travel_graph():
     builder = StateGraph(TravelGraphState)
 
-    builder.add_node("router_node", router_node)
-    builder.add_node("weather_node", weather_node)
-    builder.add_node("city_guide_node", city_guide_node)
-    builder.add_node("places_discovery_node", places_discovery_node)
-    builder.add_node("budget_node", budget_node)
-    builder.add_node("news_fetch_node", news_fetch_node)
-    builder.add_node("news_analysis_node", news_analysis_node)
-    builder.add_node("risk_analysis_node", risk_analysis_node)
-    builder.add_node("llm_planner_node", llm_planner_node)
+    builder.add_node("agent_node", agent_node)
+    builder.add_node("tool_executor_node", tool_executor_node)
+    builder.add_node("final_parser_node", final_parser_node)
 
-    builder.add_edge(START, "router_node")
-    builder.add_edge("router_node", "weather_node")
-    builder.add_edge("weather_node", "city_guide_node")
-    builder.add_edge("city_guide_node", "places_discovery_node")
-    builder.add_edge("places_discovery_node", "budget_node")
-    builder.add_edge("budget_node", "news_fetch_node")
-    builder.add_edge("news_fetch_node", "news_analysis_node")
-    builder.add_edge("news_analysis_node", "risk_analysis_node")
-    builder.add_edge("risk_analysis_node", "llm_planner_node")
-    builder.add_edge("llm_planner_node", END)
+    builder.add_edge(START, "agent_node")
+
+    builder.add_conditional_edges(
+        "agent_node",
+        should_continue,
+        {
+            "tool_executor_node": "tool_executor_node",
+            "final_parser_node": "final_parser_node",
+        },
+    )
+
+    builder.add_conditional_edges(
+        "tool_executor_node",
+        after_tool_execution,
+        {
+            "agent_node": "agent_node",
+            "final_parser_node": "final_parser_node",
+        },
+    )
+
+    builder.add_edge("final_parser_node", END)
 
     return builder.compile()
 
@@ -847,20 +756,73 @@ def build_travel_graph():
 travel_graph = build_travel_graph()
 
 
+# ============================================================
+# Public Runner
+# ============================================================
+
 @traceable(name="run_travel_planner_agent")
-def run_travel_planner_agent(input_data: dict) -> dict:
+def run_travel_planner_agent(input_data: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    Main entry point called by FastAPI route.
+
+    This deployment-optimized version uses:
+    - LangGraph
+    - LLM tool binding
+    - Dynamic places
+    - Stay/mobility tools
+    - Weather/news/risk/budget tools
+
+    RAG code is kept in the project but disabled from this branch.
+    """
+
     initial_state: TravelGraphState = {
         "destination": input_data["destination"],
         "days": input_data["days"],
         "travelers": input_data.get("travelers", 1),
         "budget": input_data["budget"],
-        "travel_style": input_data.get("travel_style", "budget friendly"),
+        "travel_style": input_data.get("travel_style", "comfort"),
         "food_preference": input_data.get("food_preference", "mixed"),
         "source_city": input_data.get("source_city"),
         "interests": input_data.get("interests", []),
+
         "news_required": input_data.get("news_required", True),
         "news_limit": input_data.get("news_limit", 5),
         "risk_check": input_data.get("risk_check", True),
+
+        "weather_summary": {},
+        "city_guide_context": (
+            "City guide RAG is disabled for this deployment. "
+            "This plan uses dynamic places and live tools."
+        ),
+        "places_result": {},
+        "discovered_places": [],
+        "stay_mobility_plan": {},
+        "cost_breakdown": {},
+        "news_articles": [],
+        "news_summary": "",
+        "news_sentiment": "Neutral",
+        "travel_risk": {},
+        "local_trends": [],
+
+        "itinerary": {},
+        "food_suggestions": [],
+        "travel_tips": [],
+        "safety_tips": [],
+        "budget_warning": "",
+        "data_limitations": [],
+        "final_summary": "",
+
+        "messages": [
+            SystemMessage(content=TOOL_BINDING_SYSTEM_PROMPT),
+            HumanMessage(content=build_user_prompt(input_data)),
+        ],
+        "tool_outputs": {},
+        "executed_nodes": [],
+        "tool_call_rounds": 0,
+
+        # Render Free optimization.
+        # Keep this low to avoid high latency, token usage, and memory pressure.
+        "max_tool_rounds": 4,
     }
 
     final_state = travel_graph.invoke(initial_state)

@@ -15,19 +15,13 @@ class TravelGraphState(TypedDict, total=False):
     news_limit: int
     risk_check: bool
 
-    weather_needed: bool
-    city_guide_needed: bool
-    places_needed: bool
-    budget_needed: bool
-    news_needed: bool
-    news_analysis_needed: bool
-    risk_needed: bool
-
     weather_summary: Dict[str, Any]
     city_guide_context: str
 
     places_result: Dict[str, Any]
     discovered_places: List[Dict[str, Any]]
+
+    stay_mobility_plan: Dict[str, Any]
 
     cost_breakdown: Dict[str, Any]
 
@@ -46,5 +40,11 @@ class TravelGraphState(TypedDict, total=False):
     data_limitations: List[str]
 
     final_summary: str
+
+    messages: List[Any]
+    tool_outputs: Dict[str, Any]
+    tool_call_rounds: int
+    max_tool_rounds: int
+
     executed_nodes: List[str]
     error: Optional[str]
