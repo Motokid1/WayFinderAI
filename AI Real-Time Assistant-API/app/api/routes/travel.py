@@ -1,19 +1,50 @@
+from typing import Any, Dict, List
+
 from fastapi import APIRouter, HTTPException
 
 from app.schemas.travel import TravelPlanRequest, TravelPlanResponse
 from app.graph.travel_graph import run_travel_planner_agent
 from app.tools.tool_registry import TRAVEL_TOOLS
 
-# ============================================================
-# RAG ingestion disabled for Render Free deployment.
-# Do not delete this import.
-# Uncomment this only in the full RAG-enabled branch/deployment.
-# ============================================================
-
-# from app.rag.ingest_city_guides import ingest_city_guides
-
 
 router = APIRouter()
+
+
+def normalize_local_trends(local_trends: Any) -> List[str]:
+    """
+    Ensures local_trends always returns List[str]
+    because TravelPlanResponse expects local_trends: List[str].
+    """
+
+    if not local_trends:
+        return []
+
+    normalized = []
+
+    for trend in local_trends:
+        if isinstance(trend, str):
+            normalized.append(trend)
+
+        elif isinstance(trend, dict):
+            event = trend.get("event", "Local update")
+            crowd = trend.get("crowd_level", "unknown crowd level")
+            traffic_area = trend.get("traffic_prone_area", "unknown area")
+            weather = trend.get("weather_concern", "no specific weather concern")
+            transport = trend.get("recommended_transport", "local transport")
+            activity = trend.get("tourist_activity", "tourist activity")
+
+            normalized.append(
+                f"{event}: Crowd level is {crowd}. "
+                f"Traffic-prone area: {traffic_area}. "
+                f"Weather concern: {weather}. "
+                f"Recommended transport: {transport}. "
+                f"Tourist activity: {activity}."
+            )
+
+        else:
+            normalized.append(str(trend))
+
+    return normalized
 
 
 @router.post("/plan", response_model=TravelPlanResponse)
@@ -46,7 +77,9 @@ def create_travel_plan(request: TravelPlanRequest):
             "news_summary": result.get("news_summary", ""),
             "news_sentiment": result.get("news_sentiment", "Neutral"),
             "travel_risk": result.get("travel_risk", {}),
-            "local_trends": result.get("local_trends", []),
+
+            # Important fix
+            "local_trends": normalize_local_trends(result.get("local_trends", [])),
 
             "itinerary": result.get("itinerary", {}),
             "food_suggestions": result.get("food_suggestions", []),
@@ -60,24 +93,32 @@ def create_travel_plan(request: TravelPlanRequest):
         }
 
     except Exception as e:
+        error_text = str(e)
+
+        if "rate_limit_exceeded" in error_text or "Rate limit reached" in error_text:
+            raise HTTPException(
+                status_code=429,
+                detail=(
+                    "The AI model daily token limit has been reached. "
+                    "Please try again later, reduce trip complexity, disable news, or use a smaller model/API tier."
+                ),
+            )
+
         raise HTTPException(
             status_code=500,
-            detail=f"Travel planning failed: {str(e)}",
+            detail=f"Travel planning failed: {error_text}",
         )
 
 
-# ============================================================
-# RAG ingestion endpoint disabled for Render Free deployment.
+# RAG ingestion disabled for Render Free deployment.
 # Do not delete this block.
-# Uncomment this only in the full RAG-enabled branch/deployment.
-# ============================================================
-
+# Uncomment only in full RAG-enabled branch.
+#
 # @router.post("/ingest-city-guides")
 # def ingest_guides():
 #     try:
 #         result = ingest_city_guides()
 #         return result
-#
 #     except Exception as e:
 #         raise HTTPException(
 #             status_code=500,

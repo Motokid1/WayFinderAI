@@ -390,11 +390,39 @@ def update_state_from_tool_result(
 
     elif tool_name == "local_trend_tool":
         if isinstance(result, dict):
-            updated_state["local_trends"] = result.get("trends", [])
+            trends = result.get("trends", [])
         elif isinstance(result, list):
-            updated_state["local_trends"] = result
+            trends = result
         else:
-            updated_state["local_trends"] = [str(result)]
+            trends = [str(result)]
+
+        normalized_trends = []
+
+        for trend in trends:
+            if isinstance(trend, str):
+                normalized_trends.append(trend)
+
+            elif isinstance(trend, dict):
+                event = trend.get("event", "Local update")
+                crowd = trend.get("crowd_level", "unknown crowd level")
+                traffic_area = trend.get("traffic_prone_area", "unknown area")
+                weather = trend.get("weather_concern", "no specific weather concern")
+                transport = trend.get("recommended_transport", "local transport")
+                activity = trend.get("tourist_activity", "tourist activity")
+
+                normalized_trends.append(
+                    f"{event}: Crowd level is {crowd}. "
+                    f"Traffic-prone area: {traffic_area}. "
+                    f"Weather concern: {weather}. "
+                    f"Recommended transport: {transport}. "
+                    f"Tourist activity: {activity}."
+                )
+
+            else:
+                normalized_trends.append(str(trend))
+
+        updated_state["local_trends"] = normalized_trends
+
 
     elif tool_name == "travel_risk_tool":
         updated_state["travel_risk"] = (
