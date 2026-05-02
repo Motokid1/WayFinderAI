@@ -1,4 +1,4 @@
-import React from "react";
+import { IndianRupee, TrendingUp } from "lucide-react";
 
 const formatCurrency = (value) => {
   const amount = Number(value || 0);
@@ -55,20 +55,6 @@ const getCategoryTotals = (costBreakdown) => {
   };
 };
 
-const getBudgetStatusLabel = (costBreakdown, totalEstimate, userBudget) => {
-  const status = costBreakdown?.budget_status;
-
-  if (status === "within_budget") return "Within planned budget";
-  if (status === "near_budget") return "Close to planned budget";
-  if (status === "over_budget") return "Above planned budget";
-
-  if (userBudget && totalEstimate > userBudget) {
-    return "Above planned budget";
-  }
-
-  return "Within planned budget";
-};
-
 const BudgetCard = ({ costBreakdown, budget }) => {
   const totalEstimate = getEstimateValue(costBreakdown);
   const categoryTotals = getCategoryTotals(costBreakdown);
@@ -77,36 +63,33 @@ const BudgetCard = ({ costBreakdown, budget }) => {
     budget || costBreakdown?.user_budget || costBreakdown?.budget || 0,
   );
 
-  const statusLabel = getBudgetStatusLabel(
-    costBreakdown,
-    totalEstimate,
-    userBudget,
-  );
-
   const isOverBudget =
     costBreakdown?.within_budget === false ||
     costBreakdown?.budget_status === "over_budget" ||
     (userBudget > 0 && totalEstimate > userBudget);
 
+  const statusLabel = isOverBudget
+    ? "Above planned budget"
+    : "Within planned budget";
+
   const budgetNote =
     costBreakdown?.budget_note ||
-    costBreakdown?.note ||
-    `The expected estimate for this trip is around ${formatCurrency(
-      totalEstimate,
-    )}${
+    `Estimated trip cost is ${formatCurrency(totalEstimate)}${
       userBudget
-        ? `, compared with your planned budget of ${formatCurrency(userBudget)}`
-        : ""
-    }. Budget confidence: ${costBreakdown?.confidence || "medium"}.`;
+        ? ` against your budget of ${formatCurrency(userBudget)}.`
+        : "."
+    }`;
 
   return (
-    <section className="budget-card">
+    <section className="card budget-card">
       <div className="section-heading">
-        <div className="section-icon">₹</div>
+        <div className="section-icon">
+          <IndianRupee size={18} />
+        </div>
 
         <div>
-          <p className="eyebrow">Budget</p>
-          <h2>Cost estimate</h2>
+          <p className="eyebrow">Budget Intelligence</p>
+          <h2>Cost Estimate</h2>
         </div>
       </div>
 
@@ -117,6 +100,7 @@ const BudgetCard = ({ costBreakdown, budget }) => {
           isOverBudget ? "budget-status-warning" : "budget-status-success"
         }`}
       >
+        <TrendingUp size={15} />
         {statusLabel}
       </div>
 
@@ -145,24 +129,12 @@ const BudgetCard = ({ costBreakdown, budget }) => {
       <p className="budget-note">{budgetNote}</p>
 
       {costBreakdown?.recommendations?.length > 0 && (
-        <div className="budget-recommendations">
-          <h4>Budget suggestions</h4>
+        <div className="recommendation-box">
+          <h4>Optimization Suggestions</h4>
 
           <ul>
-            {costBreakdown.recommendations.slice(0, 4).map((item, index) => (
+            {costBreakdown.recommendations.slice(0, 3).map((item, index) => (
               <li key={`budget-rec-${index}`}>{item}</li>
-            ))}
-          </ul>
-        </div>
-      )}
-
-      {costBreakdown?.saving_plan?.length > 0 && (
-        <div className="budget-recommendations">
-          <h4>Saving plan</h4>
-
-          <ul>
-            {costBreakdown.saving_plan.slice(0, 4).map((item, index) => (
-              <li key={`saving-plan-${index}`}>{item}</li>
             ))}
           </ul>
         </div>

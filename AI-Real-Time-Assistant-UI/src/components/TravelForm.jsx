@@ -1,184 +1,185 @@
-import { useState } from "react";
+import {
+  CalendarDays,
+  IndianRupee,
+  MapPin,
+  Plane,
+  Search,
+  Users,
+} from "lucide-react";
 
-const initialFormData = {
-  destination: "Hyderabad",
-  days: 2,
-  budget: 10000,
-  travel_style: "comfort",
-  food_preference: "mixed",
-  source_city: "Vijayawada",
-  interests: "clubs, pubs, nightlife, cafes",
-  news_required: true,
-  news_limit: 5,
-  risk_check: true,
-};
-
-function TravelForm({ onSubmit, loading }) {
-  const [formData, setFormData] = useState(initialFormData);
-
-  const handleChange = (event) => {
-    const { name, value, type, checked } = event.target;
-
-    setFormData((prev) => ({
-      ...prev,
-      [name]:
-        type === "checkbox"
-          ? checked
-          : name === "days" || name === "budget" || name === "news_limit"
-            ? Number(value)
-            : value,
+const TravelForm = ({ formData, setFormData, onSubmit, isLoading }) => {
+  const updateField = (field, value) => {
+    setFormData((previous) => ({
+      ...previous,
+      [field]: value,
     }));
   };
 
-  const handleSubmit = (event) => {
-    event.preventDefault();
-
-    const payload = {
-      ...formData,
-      interests: formData.interests
-        .split(",")
-        .map((item) => item.trim())
-        .filter(Boolean),
-    };
-
-    onSubmit(payload);
-  };
-
   return (
-    <form className="planner-card travel-form" onSubmit={handleSubmit}>
-      <div className="form-title">
-        <span className="soft-label">Trip details</span>
-        <h2>Create your plan</h2>
-        <p>Tell us where you are going and what kind of experience you want.</p>
-      </div>
-
-      <div className="form-group">
-        <label>Destination</label>
-        <input
-          type="text"
-          name="destination"
-          value={formData.destination}
-          onChange={handleChange}
-          placeholder="Enter destination"
-          required
-        />
-      </div>
-
-      <div className="form-row">
-        <div className="form-group">
-          <label>Duration</label>
-          <input
-            type="number"
-            name="days"
-            min="1"
-            max="15"
-            value={formData.days}
-            onChange={handleChange}
-            required
-          />
+    <section className="form-card">
+      <div className="section-heading">
+        <div className="section-icon">
+          <Plane size={18} />
         </div>
 
-        <div className="form-group">
-          <label>Budget</label>
-          <input
-            type="number"
-            name="budget"
-            min="500"
-            value={formData.budget}
-            onChange={handleChange}
-            required
-          />
+        <div>
+          <p className="eyebrow">Trip Request</p>
+          <h2>Create a travel plan</h2>
         </div>
       </div>
 
-      <div className="form-group">
-        <label>Starting from</label>
-        <input
-          type="text"
-          name="source_city"
-          value={formData.source_city}
-          onChange={handleChange}
-          placeholder="Optional"
-        />
-      </div>
+      <form onSubmit={onSubmit} className="travel-form">
+        <div className="form-grid two">
+          <label>
+            <span>
+              <MapPin size={15} />
+              Destination
+            </span>
+            <input
+              value={formData.destination}
+              onChange={(event) =>
+                updateField("destination", event.target.value)
+              }
+              placeholder="Hyderabad"
+              required
+            />
+          </label>
 
-      <div className="form-row">
-        <div className="form-group">
-          <label>Travel style</label>
-          <select
-            name="travel_style"
-            value={formData.travel_style}
-            onChange={handleChange}
-          >
-            <option value="budget friendly">Budget</option>
-            <option value="comfort">Comfort</option>
-            <option value="premium">Premium</option>
-            <option value="luxury">Luxury</option>
-          </select>
+          <label>
+            <span>
+              <MapPin size={15} />
+              Source City
+            </span>
+            <input
+              value={formData.source_city}
+              onChange={(event) =>
+                updateField("source_city", event.target.value)
+              }
+              placeholder="Vijayawada"
+            />
+          </label>
         </div>
 
-        <div className="form-group">
-          <label>Food preference</label>
-          <select
-            name="food_preference"
-            value={formData.food_preference}
-            onChange={handleChange}
-          >
-            <option value="veg">Veg</option>
-            <option value="non-veg">Non-Veg</option>
-            <option value="mixed">Mixed</option>
-            <option value="vegan">Vegan</option>
-          </select>
+        <div className="form-grid three">
+          <label>
+            <span>
+              <CalendarDays size={15} />
+              Days
+            </span>
+            <input
+              type="number"
+              min="1"
+              max="10"
+              value={formData.days}
+              onChange={(event) => updateField("days", event.target.value)}
+              required
+            />
+          </label>
+
+          <label>
+            <span>
+              <Users size={15} />
+              Travelers
+            </span>
+            <input
+              type="number"
+              min="1"
+              max="10"
+              value={formData.travelers}
+              onChange={(event) => updateField("travelers", event.target.value)}
+              required
+            />
+          </label>
+
+          <label>
+            <span>
+              <IndianRupee size={15} />
+              Budget
+            </span>
+            <input
+              type="number"
+              min="1000"
+              value={formData.budget}
+              onChange={(event) => updateField("budget", event.target.value)}
+              required
+            />
+          </label>
         </div>
-      </div>
 
-      <div className="form-group">
-        <label>Interests</label>
-        <textarea
-          name="interests"
-          value={formData.interests}
-          onChange={handleChange}
-          rows="4"
-          placeholder="nightlife, cafes, shopping, historical places"
-        />
-        <p className="input-hint">Separate interests using commas.</p>
-      </div>
+        <div className="form-grid two">
+          <label>
+            <span>Travel Style</span>
+            <select
+              value={formData.travel_style}
+              onChange={(event) =>
+                updateField("travel_style", event.target.value)
+              }
+            >
+              <option value="budget">Budget</option>
+              <option value="comfort">Comfort</option>
+              <option value="premium">Premium</option>
+              <option value="luxury">Luxury</option>
+            </select>
+          </label>
 
-      <div className="toggle-card">
+          <label>
+            <span>Food Preference</span>
+            <select
+              value={formData.food_preference}
+              onChange={(event) =>
+                updateField("food_preference", event.target.value)
+              }
+            >
+              <option value="veg">Vegetarian</option>
+              <option value="non-veg">Non-Vegetarian</option>
+              <option value="mixed">Mixed</option>
+              <option value="local">Local Cuisine</option>
+            </select>
+          </label>
+        </div>
+
         <label>
-          <input
-            type="checkbox"
-            name="news_required"
-            checked={formData.news_required}
-            onChange={handleChange}
+          <span>Interests</span>
+          <textarea
+            value={formData.interests}
+            onChange={(event) => updateField("interests", event.target.value)}
+            placeholder="cafes, nightlife, food, heritage, shopping"
+            rows="3"
           />
-          <span>
-            <strong>Include local updates</strong>
-            <small>Check recent destination activity and alerts.</small>
-          </span>
+          <small>Separate interests using commas.</small>
         </label>
-      </div>
 
-      <div className="toggle-card">
-        <label>
-          <input
-            type="checkbox"
-            name="risk_check"
-            checked={formData.risk_check}
-            onChange={handleChange}
-          />
-          <span>
-            <strong>Include safety review</strong>
-            <small>Assess travel risk using available context.</small>
-          </span>
-        </label>
-      </div>
+        <div className="advanced-options">
+          <label className="check-row">
+            <input
+              type="checkbox"
+              checked={formData.news_required}
+              onChange={(event) =>
+                updateField("news_required", event.target.checked)
+              }
+            />
+            <span>Include live news and local trend signals</span>
+          </label>
 
-      <button type="submit" className="primary-action" disabled={loading}>
-        {loading ? "Preparing your plan..." : "Generate itinerary"}
-      </button>
-    </form>
+          <label className="check-row">
+            <input
+              type="checkbox"
+              checked={formData.risk_check}
+              onChange={(event) =>
+                updateField("risk_check", event.target.checked)
+              }
+            />
+            <span>Include travel risk and safety analysis</span>
+          </label>
+        </div>
+
+        <button type="submit" className="primary-button" disabled={isLoading}>
+          <Search size={18} />
+          {isLoading ? "Generating Plan..." : "Generate Travel Plan"}
+        </button>
+      </form>
+    </section>
   );
-}
+};
 
 export default TravelForm;

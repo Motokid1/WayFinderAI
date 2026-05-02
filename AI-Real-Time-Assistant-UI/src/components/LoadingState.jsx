@@ -1,14 +1,26 @@
-function LoadingState() {
+import { Loader2 } from "lucide-react";
+
+const LoadingState = () => {
   return (
-    <div className="loading-panel">
-      <div className="loading-orb"></div>
-      <h2>Designing your itinerary</h2>
+    <section className="loading-card">
+      <div className="loader-ring">
+        <Loader2 size={34} />
+      </div>
+
+      <h2>Building your intelligent travel plan</h2>
+
       <p>
-        Reviewing destination conditions, local context, budget fit, and safety
-        signals.
+        WayFinderAI is checking destination context, weather, places, budget,
+        mobility, and safety signals.
       </p>
-    </div>
+
+      <div className="loading-steps">
+        <span>Analyzing destination</span>
+        <span>Estimating budget</span>
+        <span>Building itinerary</span>
+      </div>
+    </section>
   );
-}
+};
 
 export default LoadingState;
