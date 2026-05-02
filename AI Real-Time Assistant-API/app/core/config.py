@@ -1,32 +1,44 @@
 from functools import lru_cache
+
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
 class Settings(BaseSettings):
+    # Application
     APP_NAME: str = "WayFinder Backend"
     APP_VERSION: str = "2.0.0"
-    ENVIRONMENT: str = "production"
+    ENVIRONMENT: str = "development"
 
+    # CORS
+    FRONTEND_URL: str = "http://localhost:5173"
+
+    # Groq / LLM
     GROQ_API_KEY: str
     LLM_MODEL_NAME: str = "llama-3.3-70b-versatile"
 
+    # Weather API
     WEATHER_API_KEY: str
     WEATHER_BASE_URL: str = "https://api.openweathermap.org/data/2.5/weather"
 
+    # News API
     NEWS_API_KEY: str
     NEWS_API_BASE_URL: str = "https://newsapi.org/v2/everything"
 
+    # MongoDB
     MONGODB_URI: str = "mongodb://localhost:27017"
     MONGODB_DB_NAME: str = "wayfinder_db"
 
+    # Places / OpenStreetMap
     PLACES_PROVIDER: str = "openstreetmap"
     OVERPASS_API_URL: str = "https://overpass-api.de/api/interpreter"
 
+    # LangSmith
     LANGSMITH_TRACING: bool = False
     LANGSMITH_API_KEY: str | None = None
     LANGSMITH_PROJECT: str = "wayfinder-travel-agent"
 
-    # RAG kept for main branch, but optional in Render optimized branch.
+    # RAG values are kept optional for this deployment branch.
+    # RAG code is not removed; it is only disabled/commented in this branch.
     RAG_ENABLED: bool = False
     EMBEDDING_MODEL_NAME: str = "sentence-transformers/all-MiniLM-L6-v2"
     CHROMA_PERSIST_DIR: str = "vector_db"

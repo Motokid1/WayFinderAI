@@ -1,11 +1,20 @@
 from fastapi import APIRouter
 
+
 router = APIRouter()
 
 
-@router.get("/health")
+@router.get("")
 def health_check():
     return {
         "status": "healthy",
-        "message": "Checkpoint 2 backend is running successfully",
+        "message": "WayFinder backend is running",
+    }
+
+
+@router.get("/")
+def health_check_slash():
+    return {
+        "status": "healthy",
+        "message": "WayFinder backend is running",
     }
