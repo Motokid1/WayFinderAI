@@ -26,4 +26,4 @@ pymongo
 # transformers
 # langchain-chroma
 # langchain-huggingface
-# langchain-community
+langchain-community
