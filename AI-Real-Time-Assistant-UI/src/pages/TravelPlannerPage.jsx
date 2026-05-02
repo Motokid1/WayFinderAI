@@ -107,7 +107,10 @@ function TravelPlannerPage() {
 
               <div className="insight-grid">
                 <WeatherCard weather={travelPlan.weather_summary} />
-                <BudgetCard budget={travelPlan.cost_breakdown} />
+                <BudgetCard
+                  costBreakdown={travelPlan.cost_breakdown}
+                  budget={travelPlan.budget}
+                />
                 <RiskCard risk={travelPlan.travel_risk} />
               </div>
 
