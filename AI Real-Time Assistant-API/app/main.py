@@ -17,7 +17,7 @@ app.add_middleware(
     allow_origins=[
         "http://localhost:5173",
         "http://localhost:3000",
-        "https://your-frontend-url.onrender.com",
+        "https://wayfinderai-ui.onrender.com/",
     ],
     allow_credentials=True,
     allow_methods=["*"],
